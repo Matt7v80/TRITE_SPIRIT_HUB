@@ -1,0 +1,218 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local ServerStorage = game:GetService("ServerStorage")
+local StarterPlayer = game:GetService("StarterPlayer")
+
+local ADMINS = { [3650838602] = true }
+
+local function ensureRemote(name)
+    if not ReplicatedStorage:FindFirstChild(name) then
+        local r = Instance.new("RemoteEvent")
+        r.Name = name
+        r.Parent = ReplicatedStorage
+    end
+end
+ensureRemote("AdminInvoke")
+ensureRemote("AdminNotify")
+
+local AdminInvoke = ReplicatedStorage:WaitForChild("AdminInvoke")
+local AdminNotify = ReplicatedStorage:WaitForChild("AdminNotify")
+
+local rateState = {}
+local RATE_WINDOW = 2
+local RATE_LIMIT = 6
+local function allowCaller(player)
+    if not player then return false end
+    local id = player.UserId
+    rateState[id] = rateState[id] or {times = {}}
+    local t = tick()
+    local arr = rateState[id].times
+    local j = 1
+    for i = 1, #arr do
+        if arr[i] > t - RATE_WINDOW then
+            arr[j] = arr[i]; j = j + 1
+        end
+    end
+    for k = #arr, j, -1 do arr[k] = nil end
+    if #arr >= RATE_LIMIT then return false end
+    table.insert(arr, t)
+    return true
+end
+
+local function isAdmin(player) return player and ADMINS[player.UserId] end
+local function findPlayerByName(name) if not name then return nil end return Players:FindFirstChild(name) end
+
+local function heuristicVerify(target)
+    if not target then return false, {"Jogador não encontrado"} end
+    local reasons = {}
+    local suspect = false
+    local char = target.Character
+    if char then
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if humanoid then
+            if humanoid.WalkSpeed and humanoid.WalkSpeed > 60 then suspect = true table.insert(reasons, ("WalkSpeed anormal (%.1f)"):format(humanoid.WalkSpeed)) end
+            if humanoid.JumpPower and humanoid.JumpPower > 120 then suspect = true table.insert(reasons, ("JumpPower anormal (%.1f)"):format(humanoid.JumpPower)) end
+        end
+        if hrp then
+            local vel = hrp.Velocity and hrp.Velocity.Magnitude or 0
+            if vel and vel > 250 then suspect = true table.insert(reasons, ("Velocidade anormal (%.1f)"):format(vel)) end
+        end
+        local toolCount = 0
+        local bp = target:FindFirstChild("Backpack")
+        if bp then toolCount = #bp:GetChildren() end
+        for _,d in ipairs(char:GetDescendants()) do if d:IsA("Tool") then toolCount = toolCount + 1 end end
+        if toolCount > 4 then suspect = true table.insert(reasons, ("Muitos Tools (%d)"):format(toolCount)) end
+    else
+        table.insert(reasons, "Sem character no momento")
+    end
+    return suspect, reasons
+end
+
+local function doBang(target)
+    if not target or not target.Character then return end
+    local hrp = target.Character:FindFirstChild("HumanoidRootPart") if not hrp then return end
+    local orb = Instance.new("Part", workspace)
+    orb.Name = "TRITE_BangOrb_"..target.Name
+    orb.Size = Vector3.new(1,1,1); orb.CanCollide = false; orb.Anchored = true; orb.Transparency = 1
+    local pe = Instance.new("ParticleEmitter", orb)
+    pe.Texture = "rbxassetid://243660559"; pe.Rate = 120; pe.Lifetime = NumberRange.new(0.4,0.8); pe.Speed = NumberRange.new(2,4); pe.Size = NumberSequence.new(1)
+    local t0 = tick(); local conn
+    conn = RunService.Heartbeat:Connect(function()
+        if not target or not target.Parent then if conn then conn:Disconnect() end; if orb then orb:Destroy() end; return end
+        local elapsed = tick() - t0 if elapsed > 6 then if conn then conn:Disconnect() end; if orb then orb:Destroy() end; return end
+        local offset = CFrame.new(0,2,-2) * CFrame.Angles(0, elapsed*3, 0)
+        orb.CFrame = hrp.CFrame * offset
+    end)
+end
+
+local function applySkyboxGlobal()
+    for _,v in ipairs(Lighting:GetChildren()) do
+        if (v.Name == "TRITE_Sky" and v:IsA("Sky")) or (v.Name == "TRITE_Atmos" and v:IsA("Atmosphere")) then v:Destroy() end
+    end
+    local sky = Instance.new("Sky")
+    sky.Name = "TRITE_Sky"
+    sky.SkyboxBk = ""
+    sky.SkyboxDn = ""
+    sky.SkyboxFt = ""
+    sky.SkyboxLf = ""
+    sky.SkyboxRt = ""
+    sky.SkyboxUp = ""
+    sky.Parent = Lighting
+    local atmos = Instance.new("Atmosphere", Lighting)
+    atmos.Name = "TRITE_Atmos"
+    atmos.Density = 0.35
+    atmos.Offset = 0.2
+    atmos.Color = Color3.fromRGB(40,6,70)
+    atmos.Decay = 0.5
+end
+
+local function reportSimulated(reporter, target, reason)
+    local folder = ServerStorage:FindFirstChild("TRITE_Reports") or Instance.new("Folder", ServerStorage) folder.Name = "TRITE_Reports"
+    local item = Instance.new("Folder", folder) item.Name = tostring(os.time())
+    local r = Instance.new("StringValue", item); r.Name = "Reporter"; r.Value = reporter.Name
+    local t = Instance.new("StringValue", item); t.Name = "Target"; t.Value = target and target.Name or "N/A"
+    local d = Instance.new("StringValue", item); d.Name = "Details"; d.Value = reason or "Reported by TRITE"
+    AdminNotify:FireAllClients({ type = "info", details = ("Report registrado (simulado): %s -> %s"):format(reporter.Name, target and target.Name or "N/A") })
+end
+
+local FALLBACK = {
+    [4924922222] = { name = "Brookhaven", actions = {
+        { key = "PermanentBan", label = "Ban" },
+        { key = "TempKick", label = "Kick" },
+        { key = "Verify", label = "Verificar Target" },
+        { key = "Bang", label = "Bang (visual)" },
+        { key = "Skybox", label = "Skybox TRITE" },
+        { key = "ReportToRoblox", label = "Report to Roblox (simulado)" },
+    } },
+    [109983668079237] = { name = "Roube um Brainrot", actions = {
+        { key = "SpawnBrainrot", label = "Spawn Brainrot" },
+        { key = "TriggerEvent", label = "Trigger Evento" },
+        { key = "AllEvents", label = "Todos Eventos" },
+        { key = "Verify", label = "Verificar Target" },
+        { key = "Bang", label = "Bang (visual)" },
+        { key = "Skybox", label = "Skybox TRITE" },
+        { key = "ReportToRoblox", label = "Report to Roblox (simulado)" },
+    } },
+}
+
+local PlaceConfig = FALLBACK[game.PlaceId] or { name = "Default", actions = {} }
+local allowed = {} for _,a in ipairs(PlaceConfig.actions) do allowed[a.key] = true end
+
+AdminInvoke.OnServerEvent:Connect(function(player, payload)
+    if type(payload) ~= "table" then return end
+    if not allowCaller(player) then AdminNotify:FireClient(player, { type = "error", message = "Rate limit" }) return end
+    local action = payload.action
+    if action == "RequestActions" then AdminNotify:FireClient(player, { type = "ActionsList", name = PlaceConfig.name, actions = PlaceConfig.actions, placeId = game.PlaceId }) return end
+    if not isAdmin(player) then AdminNotify:FireClient(player, { type = "error", message = "Acesso negado" }) return end
+    if not allowed[action] then AdminNotify:FireClient(player, { type = "error", message = "Ação não permitida" }) return end
+    local target = nil
+    if payload.targetUserId then for _,pl in ipairs(Players:GetPlayers()) do if pl.UserId == payload.targetUserId then target = pl break end end
+    elseif payload.targetName then target = findPlayerByName(payload.targetName) end
+    if action == "PermanentBan" and target then pcall(function() target:Kick("Banido pelos seus atos") end); AdminNotify:FireAllClients({ type = "ban", details = target.Name }); return end
+    if action == "TempKick" and target then pcall(function() target:Kick("Removido pelo servidor") end); AdminNotify:FireAllClients({ type = "kick", details = target.Name }); return end
+    if action == "Verify" then local suspect, reasons = heuristicVerify(target); local msg if suspect then msg = ("Sim, o Player %s é Hacker!! Razões: %s"):format(target and target.Name or "N/A", table.concat(reasons, ", ")) else msg = ("Não. %s não é Hacker"):format(target and target.Name or "N/A") end AdminNotify:FireClient(player, { type = "verify_result", ok = suspect, message = msg, target = target and target.Name }); return end
+    if action == "Bang" and target then doBang(target); AdminNotify:FireAllClients({ type = "info", details = ("Bang aplicado em %s"):format(target.Name) }); return end
+    if action == "Skybox" then applySkyboxGlobal(); AdminNotify:FireAllClients({ type = "info", details = "Skybox TRITE aplicado globalmente" }); return end
+    if action == "ReportToRoblox" and target then reportSimulated(player, target, payload.reason); return end
+    AdminNotify:FireClient(player, { type = "error", message = "Ação processada (ou não implementada)." })
+end)
+
+local function ensureClientScript()
+    local starter = StarterPlayer:FindFirstChild("StarterPlayerScripts")
+    if not starter then return end
+    if starter:FindFirstChild("TRITE_SPIRIT_Client") then return end
+    local ls = Instance.new("LocalScript")
+    ls.Name = "TRITE_SPIRIT_Client"
+    ls.Source = [[
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local Player = Players.LocalPlayer
+local AdminInvoke = ReplicatedStorage:WaitForChild("AdminInvoke")
+local AdminNotify = ReplicatedStorage:WaitForChild("AdminNotify")
+local TweenService = game:GetService("TweenService")
+local function notify(txt,sec)
+    sec = sec or 4
+    local pg = Player:WaitForChild("PlayerGui")
+    local g = Instance.new("ScreenGui", pg); g.ResetOnSpawn=false
+    local f = Instance.new("Frame", g); f.Size=UDim2.new(0.6,0,0,80); f.Position=UDim2.new(0.2,0,0.1,0); f.BackgroundColor3=Color3.fromRGB(6,120,10)
+    local l = Instance.new("TextLabel", f); l.Size=UDim2.new(1,-8,1,-8); l.Position=UDim2.new(0,4,0,4); l.BackgroundTransparency=1; l.Text=txt; l.TextWrapped=true; l.Font=Enum.Font.Gotham; l.TextSize=18
+    task.delay(sec, function() if g and g.Parent then g:Destroy() end end)
+end
+AdminNotify.OnClientEvent:Connect(function(payload)
+    if type(payload)~='table' then return end
+    if payload.type == 'ActionsList' then
+        local pg = Player:WaitForChild("PlayerGui")
+        if pg:FindFirstChild("TRITE_SPIRIT_Hub_Main") then return end
+        local gui = Instance.new("ScreenGui", pg); gui.Name="TRITE_SPIRIT_Hub_Main"; gui.ResetOnSpawn=false
+        local fr = Instance.new("Frame", gui); fr.Size=UDim2.new(0,760,0,420); fr.Position=UDim2.new(0.5,-380,0.5,-210); fr.AnchorPoint=Vector2.new(0.5,0.5); fr.BackgroundColor3=Color3.fromRGB(22,22,24)
+        local title = Instance.new("TextLabel", fr); title.Size=UDim2.new(1,0,0,48); title.BackgroundTransparency=1; title.Font=Enum.Font.GothamBold; title.TextSize=18; title.TextColor3=Color3.fromRGB(230,230,230); title.Text="TRITE SPIRIT Hub - "..(payload.name or "Mode")
+        local y = 56
+        for _,act in ipairs(payload.actions or {}) do
+            local b = Instance.new("TextButton", fr); b.Size=UDim2.new(0,320,0,34); b.Position=UDim2.new(0,20,0,y); b.Text=act.label or act.key; b.Font=Enum.Font.Gotham; b.TextColor3=Color3.fromRGB(240,240,240); b.BackgroundColor3=Color3.fromRGB(30,30,30)
+            b.MouseButton1Click:Connect(function()
+                if act.key == "Verify" or act.key=="Bang" or act.key=="ReportToRoblox" or act.key=="Skybox" then
+                    local input = Instance.new("TextBox", pg); input.Size=UDim2.new(0,300,0,30); input.Position=UDim2.new(0.5,-150,0.82,0); input.PlaceholderText="Digite o nick do jogador..."; input.FocusLost:Connect(function() local name=input.Text; input:Destroy(); if name~='' then pcall(function() AdminInvoke:FireServer({ action = act.key, targetName = name }) end) end end)
+                else
+                    pcall(function() AdminInvoke:FireServer({ action = act.key }) end)
+                end
+            end)
+            y = y + 44
+        end
+    elseif payload.type == 'verify_result' then
+        notify(payload.message or "Resultado",5)
+    else
+        notify(payload.details or payload.message or "TRITE: info",4)
+    end
+end)
+pcall(function() AdminInvoke:FireServer({ action = "RequestActions" }) end)
+]]
+    ls.Parent = starter
+end
+
+ensureClientScript()
+
+print("[TRITE_SPIRIT] TRITE_SPIRIT_HUB loaded")
+      
